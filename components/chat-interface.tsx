@@ -7,38 +7,24 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Send, Mic, Menu } from "lucide-react"
 import { ThemeToggle } from "@/components/theme-toggle"
+import { ErrorBoundary, useErrorRecovery } from "@/components/error-boundary"
+import { useChatMessages, useChatSessions } from "@/lib/chat-context"
 import { cn } from "@/lib/utils"
-
-interface Message {
-  id: string
-  content: string
-  role: "user" | "assistant"
-  timestamp: Date
-  citations?: Array<{
-    page_number: number
-    chapter_title: string
-    section_title: string
-  }>
-  reasoning?: {
-    query_decomposition: string[]
-    clinical_reasoning: string[]
-    confidence_score: number
-    risk_level: "low" | "medium" | "high"
-    requires_specialist: boolean
-  }
-}
+import type { ChatMessage } from "@/app/api/sessions/route"
 
 interface ChatInterfaceProps {
   onMenuClick: () => void
 }
 
 export function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
-  const [messages, setMessages] = useState<Message[]>([])
+  const { messages, isProcessing, sendMessage } = useChatMessages()
+  const { currentSession } = useChatSessions()
   const [input, setInput] = useState("")
-  const [isLoading, setIsLoading] = useState(false)
-  const [sessionId] = useState(() => crypto.randomUUID())
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  
+  // Add error recovery hook
+  const { error: apiError, resetError, captureError } = useErrorRecovery()
 
   const hasMessages = messages.length > 0
 
@@ -52,65 +38,23 @@ export function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!input.trim() || isLoading) return
+    if (!input.trim() || isProcessing) return
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      content: input.trim(),
-      role: "user",
-      timestamp: new Date(),
-    }
+    // Reset any previous API errors
+    resetError()
 
-    setMessages((prev) => [...prev, userMessage])
     const currentInput = input.trim()
     setInput("")
-    setIsLoading(true)
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: currentInput,
-          sessionId: sessionId,
-        }),
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-
-      const data = await response.json()
-
-      if (data.error) {
-        throw new Error(data.error)
-      }
-
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        content: data.response,
-        role: "assistant",
-        timestamp: new Date(),
-        citations: data.citations || [],
-        reasoning: data.reasoning,
-      }
-
-      setMessages((prev) => [...prev, assistantMessage])
+      await sendMessage(currentInput)
     } catch (error) {
-      console.error("Chat API error:", error)
-
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        content:
-          "I apologize, but I'm having trouble connecting to the medical database right now. Please try again in a moment, or consult with a healthcare professional for immediate medical concerns.",
-        role: "assistant",
-        timestamp: new Date(),
+      console.error("Chat error:", error)
+      
+      // Capture error for recovery
+      if (error instanceof Error) {
+        captureError(error)
       }
-      setMessages((prev) => [...prev, errorMessage])
-    } finally {
-      setIsLoading(false)
     }
   }
 
@@ -126,6 +70,27 @@ export function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
   ]
 
   return (
+    <ErrorBoundary
+      fallback={
+        <div className="flex items-center justify-center h-screen bg-white dark:bg-[#1e1e1e]">
+          <div className="text-center p-8">
+            <h2 className="text-xl font-semibold text-red-600 dark:text-red-400 mb-4">
+              Chat Interface Error
+            </h2>
+            <p className="text-gray-600 dark:text-gray-400 mb-6">
+              The chat interface encountered an error. Please refresh the page to continue.
+            </p>
+            <Button onClick={() => window.location.reload()}>
+              Refresh Page
+            </Button>
+          </div>
+        </div>
+      }
+      onError={(error, errorInfo) => {
+        console.error('[ChatInterface] Component error:', error)
+        console.error('[ChatInterface] Error info:', errorInfo)
+      }}
+    >
     <div className="flex flex-col h-screen bg-white dark:bg-[#1e1e1e]">
       {/* Header */}
       <header className="flex items-center justify-between p-4 border-b border-black dark:border-[#333333]">
@@ -143,6 +108,33 @@ export function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
         {/* Theme Toggle */}
         <ThemeToggle />
       </header>
+
+      {/* API Error Recovery Banner */}
+      {apiError && (
+        <div className="bg-red-50 dark:bg-red-950 border-b border-red-200 dark:border-red-800 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <div className="w-2 h-2 bg-red-500 rounded-full mr-3"></div>
+              <div>
+                <p className="text-sm text-red-800 dark:text-red-200 font-medium">
+                  Connection issue detected
+                </p>
+                <p className="text-xs text-red-600 dark:text-red-300">
+                  {apiError.message}
+                </p>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={resetError}
+              className="text-red-700 dark:text-red-300 border-red-300 dark:border-red-600 hover:bg-red-100 dark:hover:bg-red-900"
+            >
+              Retry
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Chat Area */}
       <div className="flex-1 overflow-hidden relative">
@@ -178,12 +170,12 @@ export function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
                   onChange={(e) => setInput(e.target.value)}
                   placeholder="Describe symptoms, age, and clinical context..."
                   className="h-18 text-lg px-6 pr-14 rounded-3xl border-black dark:border-[#333333] bg-white dark:bg-[#1C1C1C] text-black dark:text-white placeholder:text-black/50 dark:placeholder:text-white/50 focus:ring-2 focus:ring-black dark:focus:ring-white"
-                  disabled={isLoading}
+                  disabled={isProcessing}
                 />
                 <Button
                   type="submit"
                   size="icon"
-                  disabled={!input.trim() || isLoading}
+                  disabled={!input.trim() || isProcessing}
                   className="absolute right-2 top-1/2 -translate-y-1/2 h-10 w-10 rounded-full bg-black dark:bg-white text-white dark:text-black hover:bg-black/80 dark:hover:bg-white/80 disabled:opacity-50"
                 >
                   <Send className="h-4 w-4" />
@@ -275,7 +267,7 @@ export function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
                   </div>
                 </div>
               ))}
-              {isLoading && (
+              {isProcessing && (
                 <div className="flex justify-start animate-fade-in">
                   <div className="bg-[#f8f8f8] dark:bg-[#121212] border border-black/10 dark:border-[#333333] rounded-xl px-4 py-3">
                     <div className="flex items-center space-x-2">
@@ -308,7 +300,7 @@ export function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
                     onChange={(e) => setInput(e.target.value)}
                     placeholder="Describe symptoms, age, and clinical context..."
                     className="h-12 px-4 pr-20 rounded-lg border-black dark:border-[#333333] bg-white dark:bg-[#1C1C1C] text-black dark:text-white placeholder:text-black/50 dark:placeholder:text-white/50"
-                    disabled={isLoading}
+                    disabled={isProcessing}
                   />
                   <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
                     <Button
@@ -322,7 +314,7 @@ export function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
                     <Button
                       type="submit"
                       size="icon"
-                      disabled={!input.trim() || isLoading}
+                      disabled={!input.trim() || isProcessing}
                       className="h-8 w-8 bg-black dark:bg-white text-white dark:text-black hover:bg-black/80 dark:hover:bg-white/80 disabled:opacity-50"
                     >
                       <Send className="h-4 w-4" />
@@ -335,5 +327,6 @@ export function ChatInterface({ onMenuClick }: ChatInterfaceProps) {
         )}
       </div>
     </div>
+    </ErrorBoundary>
   )
 }

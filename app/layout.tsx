@@ -3,6 +3,7 @@ import type { Metadata, Viewport } from "next"
 import { GeistSans } from "geist/font/sans"
 import { GeistMono } from "geist/font/mono"
 import { ThemeProvider } from "@/components/theme-provider"
+import { ErrorBoundary } from "@/components/error-boundary"
 import "./globals.css"
 
 export const metadata: Metadata = {
@@ -86,9 +87,25 @@ export default function RootLayout({
         />
       </head>
       <body className={`font-sans ${GeistSans.variable} ${GeistMono.variable} antialiased`}>
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-          {children}
-        </ThemeProvider>
+        <ErrorBoundary
+          onError={(error, errorInfo) => {
+            // Log errors to console in development
+            if (process.env.NODE_ENV === 'development') {
+              console.error('[Root ErrorBoundary] Application error:', error)
+              console.error('[Root ErrorBoundary] Error info:', errorInfo)
+            }
+            
+            // In production, you would send this to your error monitoring service
+            if (process.env.NODE_ENV === 'production') {
+              // Example: Send to error monitoring service
+              console.error('[Root ErrorBoundary] Production error logged')
+            }
+          }}
+        >
+          <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+            {children}
+          </ThemeProvider>
+        </ErrorBoundary>
       </body>
     </html>
   )

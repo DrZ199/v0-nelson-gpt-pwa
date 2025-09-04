@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server"
+import { generateEmbedding, validateHuggingFaceConfig } from "@/lib/embeddings"
 import { type NextRequest, NextResponse } from "next/server"
 
 interface ChatMessage {
@@ -116,73 +117,107 @@ async function performMultiStageRetrieval(supabase: any, query: string, decompos
   const allChunks: any[] = []
   const searchQueries: string[] = []
 
-  // Stage 1: Primary symptom search
-  if (decomposition.symptoms.length > 0) {
-    const symptomQuery = decomposition.symptoms.join(" ")
-    searchQueries.push(symptomQuery)
-    const embedding = mockEmbedding(symptomQuery)
+  try {
+    // Stage 1: Primary symptom search
+    if (decomposition.symptoms.length > 0) {
+      const symptomQuery = decomposition.symptoms.join(" ")
+      searchQueries.push(symptomQuery)
+      
+      console.log('[Retrieval] Generating embedding for symptoms:', symptomQuery)
+      const embedding = await generateEmbedding(symptomQuery)
 
-    const { data: symptomChunks } = await supabase.rpc("match_nelson_chunks", {
+      const { data: symptomChunks, error: symptomError } = await supabase.rpc("match_nelson_chunks", {
+        query_embedding: embedding,
+        match_threshold: 0.6,
+        match_count: 3,
+      })
+
+      if (symptomError) {
+        console.error('[Retrieval] Error in symptom search:', symptomError)
+      } else if (symptomChunks) {
+        allChunks.push(...symptomChunks)
+        console.log('[Retrieval] Found', symptomChunks.length, 'symptom-related chunks')
+      }
+    }
+
+    // Stage 2: Age-specific search
+    if (decomposition.demographics.length > 0) {
+      const ageQuery = `${decomposition.demographics.join(" ")} pediatric`
+      searchQueries.push(ageQuery)
+      
+      console.log('[Retrieval] Generating embedding for demographics:', ageQuery)
+      const embedding = await generateEmbedding(ageQuery)
+
+      const { data: ageChunks, error: ageError } = await supabase.rpc("match_nelson_chunks", {
+        query_embedding: embedding,
+        match_threshold: 0.6,
+        match_count: 2,
+      })
+
+      if (ageError) {
+        console.error('[Retrieval] Error in age search:', ageError)
+      } else if (ageChunks) {
+        allChunks.push(...ageChunks)
+        console.log('[Retrieval] Found', ageChunks.length, 'age-specific chunks')
+      }
+    }
+
+    // Stage 3: General query search
+    console.log('[Retrieval] Generating embedding for full query:', query.substring(0, 100) + '...')
+    const embedding = await generateEmbedding(query)
+    
+    const { data: generalChunks, error: generalError } = await supabase.rpc("match_nelson_chunks", {
       query_embedding: embedding,
-      match_threshold: 0.6,
+      match_threshold: 0.7,
       match_count: 3,
     })
 
-    if (symptomChunks) allChunks.push(...symptomChunks)
-  }
+    if (generalError) {
+      console.error('[Retrieval] Error in general search:', generalError)
+    } else if (generalChunks) {
+      allChunks.push(...generalChunks)
+      console.log('[Retrieval] Found', generalChunks.length, 'general chunks')
+    }
 
-  // Stage 2: Age-specific search
-  if (decomposition.demographics.length > 0) {
-    const ageQuery = `${decomposition.demographics.join(" ")} pediatric`
-    searchQueries.push(ageQuery)
-    const embedding = mockEmbedding(ageQuery)
+    // Remove duplicates and rank by relevance
+    const uniqueChunks = allChunks.filter((chunk, index, self) => 
+      index === self.findIndex((c) => c.id === chunk.id)
+    )
 
-    const { data: ageChunks } = await supabase.rpc("match_nelson_chunks", {
-      query_embedding: embedding,
-      match_threshold: 0.6,
-      match_count: 2,
-    })
+    console.log('[Retrieval] Total unique chunks found:', uniqueChunks.length)
 
-    if (ageChunks) allChunks.push(...ageChunks)
-  }
-
-  // Stage 3: General query search
-  const embedding = mockEmbedding(query)
-  const { data: generalChunks } = await supabase.rpc("match_nelson_chunks", {
-    query_embedding: embedding,
-    match_threshold: 0.7,
-    match_count: 3,
-  })
-
-  if (generalChunks) allChunks.push(...generalChunks)
-
-  // Remove duplicates and rank by relevance
-  const uniqueChunks = allChunks.filter((chunk, index, self) => index === self.findIndex((c) => c.id === chunk.id))
-
-  return {
-    chunks: uniqueChunks.slice(0, 5), // Top 5 most relevant
-    search_queries: searchQueries,
+    return {
+      chunks: uniqueChunks.slice(0, 5), // Top 5 most relevant
+      search_queries: searchQueries,
+    }
+  } catch (error) {
+    console.error('[Retrieval] Error in multi-stage retrieval:', error)
+    
+    // If embedding generation fails, return empty results but don't crash
+    return {
+      chunks: [],
+      search_queries: searchQueries,
+      error: error instanceof Error ? error.message : 'Unknown retrieval error'
+    }
   }
 }
 
-// Mock embedding function - in production, use OpenAI or similar
-function mockEmbedding(text: string): number[] {
-  // Simple hash-based mock embedding for demonstration
-  const hash = text.split("").reduce((a, b) => {
-    a = (a << 5) - a + b.charCodeAt(0)
-    return a & a
-  }, 0)
-
-  // Generate a 1536-dimensional vector (OpenAI embedding size)
-  const embedding = []
-  for (let i = 0; i < 1536; i++) {
-    embedding.push(Math.sin(hash + i) * 0.1)
-  }
-  return embedding
-}
 
 export async function POST(request: NextRequest) {
   try {
+    // Validate Hugging Face configuration first
+    const configValidation = await validateHuggingFaceConfig()
+    if (!configValidation.valid) {
+      console.error('[Chat API] Hugging Face configuration invalid:', configValidation.error)
+      return NextResponse.json(
+        { 
+          error: "Embedding service not properly configured. Please check your Hugging Face API key.",
+          details: configValidation.error 
+        }, 
+        { status: 500 }
+      )
+    }
+
     const supabase = await createClient()
     const { message, sessionId }: ChatRequest = await request.json()
 
@@ -190,19 +225,28 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Message is required" }, { status: 400 })
     }
 
-    console.log("[v0] Starting multi-stage reasoning for query:", message)
+    console.log("[Chat API] Starting multi-stage reasoning for query:", message)
 
     // Stage 1: Query decomposition
     const decomposition = decomposeQuery(message)
-    console.log("[v0] Query decomposition:", decomposition)
+    console.log("[Chat API] Query decomposition:", decomposition)
 
     // Stage 2: Clinical risk assessment
     const riskAssessment = assessClinicalRisk(message, decomposition)
-    console.log("[v0] Risk assessment:", riskAssessment)
+    console.log("[Chat API] Risk assessment:", riskAssessment)
 
-    // Stage 3: Multi-stage retrieval
+    // Stage 3: Multi-stage retrieval with real embeddings
     const retrievalResult = await performMultiStageRetrieval(supabase, message, decomposition)
-    console.log("[v0] Retrieved chunks:", retrievalResult.chunks.length)
+    console.log("[Chat API] Retrieved chunks:", retrievalResult.chunks.length)
+
+    // Check if retrieval had errors
+    if (retrievalResult.error) {
+      console.error('[Chat API] Retrieval error:', retrievalResult.error)
+      return NextResponse.json({
+        error: "I'm having trouble accessing the medical database right now. Please try again in a moment.",
+        details: retrievalResult.error
+      }, { status: 503 })
+    }
 
     const context =
       retrievalResult.chunks
@@ -219,39 +263,46 @@ export async function POST(request: NextRequest) {
         page_number: chunk.page_number,
         chapter_title: chunk.chapter_title,
         section_title: chunk.section_title,
+        similarity_score: chunk.similarity || 0,
       })) || []
 
     const confidence_score = calculateConfidenceScore(retrievalResult.chunks, decomposition, riskAssessment)
 
     const reasoning = {
       query_decomposition: [
-        ...decomposition.symptoms.map((s) => `Symptom: ${s}`),
-        ...decomposition.demographics.map((d) => `Demographics: ${d}`),
-        ...decomposition.clinical_context.map((c) => `Clinical context: ${c}`),
+        ...decomposition.symptoms.map((s: string) => `Symptom: ${s}`),
+        ...decomposition.demographics.map((d: string) => `Demographics: ${d}`),
+        ...decomposition.clinical_context.map((c: string) => `Clinical context: ${c}`),
       ],
       clinical_reasoning: riskAssessment.clinical_reasoning,
       confidence_score,
       risk_level: riskAssessment.risk_level,
       requires_specialist: riskAssessment.requires_specialist,
+      search_queries: retrievalResult.search_queries,
     }
 
     // Save chat session and messages if sessionId provided
     if (sessionId) {
-      // Save user message
-      await supabase.from("chat_messages").insert({
-        session_id: sessionId,
-        role: "user",
-        content: message,
-      })
+      try {
+        // Save user message
+        await supabase.from("chat_messages").insert({
+          session_id: sessionId,
+          role: "user",
+          content: message,
+        })
 
-      // Save assistant response with reasoning
-      await supabase.from("chat_messages").insert({
-        session_id: sessionId,
-        role: "assistant",
-        content: response,
-        citations: citations,
-        reasoning: reasoning,
-      })
+        // Save assistant response with reasoning
+        await supabase.from("chat_messages").insert({
+          session_id: sessionId,
+          role: "assistant",
+          content: response,
+          citations: citations,
+          reasoning: reasoning,
+        })
+      } catch (dbError) {
+        console.error('[Chat API] Database save error:', dbError)
+        // Don't fail the request if we can't save to DB, just log it
+      }
     }
 
     return NextResponse.json({
@@ -259,10 +310,33 @@ export async function POST(request: NextRequest) {
       citations,
       reasoning,
       context_used: retrievalResult.chunks?.length || 0,
+      embedding_model: process.env.HUGGINGFACE_EMBEDDING_MODEL || 'sentence-transformers/all-MiniLM-L6-v2'
     })
   } catch (error) {
     console.error("Chat API error:", error)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    
+    // Provide more specific error messages based on the error type
+    if (error instanceof Error) {
+      if (error.message.includes('rate limit')) {
+        return NextResponse.json({ 
+          error: "I'm receiving too many requests right now. Please wait a moment and try again." 
+        }, { status: 429 })
+      }
+      if (error.message.includes('unauthorized')) {
+        return NextResponse.json({ 
+          error: "Authentication error with the embedding service. Please try again." 
+        }, { status: 401 })
+      }
+      if (error.message.includes('embedding')) {
+        return NextResponse.json({ 
+          error: "I'm having trouble processing your question right now. Please try rephrasing or try again later." 
+        }, { status: 503 })
+      }
+    }
+    
+    return NextResponse.json({ 
+      error: "I apologize, but I'm experiencing technical difficulties. Please try again in a moment." 
+    }, { status: 500 })
   }
 }
 

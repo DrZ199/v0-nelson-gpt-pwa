@@ -14,11 +14,14 @@ import { AIResponsesSettingsPage } from "@/components/pages/ai-responses-setting
 import { DataPrivacySettingsPage } from "@/components/pages/data-privacy-settings-page"
 import { InstallPrompt } from "@/components/install-prompt"
 import { ConnectionStatus } from "@/components/connection-status"
+import { SettingsProvider } from "@/lib/settings-context"
+import { ChatProvider } from "@/lib/chat-context"
 
 export default function HomePage() {
   const [showSplash, setShowSplash] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [currentPage, setCurrentPage] = useState("chat")
+  const [sessionId] = useState(() => crypto.randomUUID())
 
   const handleSplashComplete = () => {
     setShowSplash(false)
@@ -39,7 +42,7 @@ export default function HomePage() {
 
   const handleNewChat = () => {
     setCurrentPage("chat")
-    // TODO: Clear current chat messages
+    // The ChatProvider will handle creating a new session
   }
 
   const handleBackToChat = () => {
@@ -55,37 +58,41 @@ export default function HomePage() {
   }
 
   return (
-    <div className="relative">
-      <Sidebar
-        isOpen={sidebarOpen}
-        onClose={handleSidebarClose}
-        currentPage={currentPage}
-        onPageChange={handlePageChange}
-        onNewChat={handleNewChat}
-      />
+    <SettingsProvider sessionId={sessionId}>
+      <ChatProvider initialSessionId={sessionId}>
+        <div className="relative">
+          <Sidebar
+            isOpen={sidebarOpen}
+            onClose={handleSidebarClose}
+            currentPage={currentPage}
+            onPageChange={handlePageChange}
+            onNewChat={handleNewChat}
+          />
 
-      {currentPage === "chat" && <ChatInterface onMenuClick={handleMenuClick} />}
+          {currentPage === "chat" && <ChatInterface onMenuClick={handleMenuClick} />}
 
-      {currentPage === "settings" && <SettingsPage onBack={handleBackToChat} />}
+          {currentPage === "settings" && <SettingsPage onBack={handleBackToChat} />}
 
-      {currentPage === "about" && <AboutPage onBack={handleBackToChat} />}
+          {currentPage === "about" && <AboutPage onBack={handleBackToChat} />}
 
-      {currentPage === "history" && <ChatInterface onMenuClick={handleMenuClick} />}
+          {currentPage === "history" && <ChatInterface onMenuClick={handleMenuClick} />}
 
-      {currentPage === "profile" && <ProfileSettingsPage onBack={handleBackToSettings} />}
+          {currentPage === "profile" && <ProfileSettingsPage onBack={handleBackToSettings} />}
 
-      {currentPage === "appearance" && <AppearanceSettingsPage onBack={handleBackToSettings} />}
+          {currentPage === "appearance" && <AppearanceSettingsPage onBack={handleBackToSettings} />}
 
-      {currentPage === "typography" && <TypographySettingsPage onBack={handleBackToSettings} />}
+          {currentPage === "typography" && <TypographySettingsPage onBack={handleBackToSettings} />}
 
-      {currentPage === "display" && <DisplaySettingsPage onBack={handleBackToSettings} />}
+          {currentPage === "display" && <DisplaySettingsPage onBack={handleBackToSettings} />}
 
-      {currentPage === "ai-responses" && <AIResponsesSettingsPage onBack={handleBackToSettings} />}
+          {currentPage === "ai-responses" && <AIResponsesSettingsPage onBack={handleBackToSettings} />}
 
-      {currentPage === "data-privacy" && <DataPrivacySettingsPage onBack={handleBackToSettings} />}
+          {currentPage === "data-privacy" && <DataPrivacySettingsPage onBack={handleBackToSettings} />}
 
-      <InstallPrompt />
-      <ConnectionStatus />
-    </div>
+          <InstallPrompt />
+          <ConnectionStatus />
+        </div>
+      </ChatProvider>
+    </SettingsProvider>
   )
 }
